@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import threading
+from dataclasses import dataclass
 
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import (
@@ -14,7 +16,9 @@ from lark_oapi.api.im.v1 import (
 )
 
 from feishu_gate.config import Settings, load_settings
-from feishu_gate.jobs import append_job, new_job, receipt
+from feishu_gate.intent import parse_probe
+from feishu_gate.jobs import Job, append_job, new_job, receipt
+from feishu_gate.probe import run_probe
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,16 +58,27 @@ def allowed(settings: Settings, event: P2ImMessageReceiveV1) -> bool:
     return sender_open_id(event) in settings.allow_open_ids
 
 
-def reply_text(api: lark.Client, event: P2ImMessageReceiveV1, text: str) -> None:
+@dataclass(frozen=True)
+class ChatTarget:
+    chat_type: str
+    chat_id: str
+    message_id: str
+
+
+def chat_target(event: P2ImMessageReceiveV1) -> ChatTarget:
+    msg = event.event.message
+    return ChatTarget(chat_type=msg.chat_type, chat_id=msg.chat_id, message_id=msg.message_id)
+
+
+def send_text(api: lark.Client, target: ChatTarget, text: str) -> None:
     content = json.dumps({"text": text}, ensure_ascii=False)
-    chat_type = event.event.message.chat_type
-    if chat_type == "p2p":
+    if target.chat_type == "p2p":
         request = (
             CreateMessageRequest.builder()
             .receive_id_type("chat_id")
             .request_body(
                 CreateMessageRequestBody.builder()
-                .receive_id(event.event.message.chat_id)
+                .receive_id(target.chat_id)
                 .msg_type("text")
                 .content(content)
                 .build()
@@ -78,7 +93,7 @@ def reply_text(api: lark.Client, event: P2ImMessageReceiveV1, text: str) -> None
         return
     request = (
         ReplyMessageRequest.builder()
-        .message_id(event.event.message.message_id)
+        .message_id(target.message_id)
         .request_body(
             ReplyMessageRequestBody.builder().content(content).msg_type("text").build()
         )
@@ -89,6 +104,27 @@ def reply_text(api: lark.Client, event: P2ImMessageReceiveV1, text: str) -> None
         raise RuntimeError(
             f"回复失败 code={response.code} msg={response.msg} log_id={response.get_log_id()}"
         )
+
+
+def reply_text(api: lark.Client, event: P2ImMessageReceiveV1, text: str) -> None:
+    send_text(api, chat_target(event), text)
+
+
+def run_probe_job(
+    settings: Settings, api: lark.Client, target: ChatTarget, job: Job
+) -> None:
+    ask = parse_probe(job.text)
+    if ask is None:
+        return
+    try:
+        body = run_probe(settings.topology_url, ask)
+        send_text(api, target, f"工单 {job.id}\n{body}")
+    except Exception:
+        log.exception("只读探测失败 job=%s", job.id)
+        try:
+            send_text(api, target, f"工单 {job.id}\n探测失败，看本机窗口日志。")
+        except Exception:
+            log.exception("连失败回执也没发出去")
 
 
 def handle_message(settings: Settings, api: lark.Client, event: P2ImMessageReceiveV1) -> None:
@@ -105,7 +141,21 @@ def handle_message(settings: Settings, api: lark.Client, event: P2ImMessageRecei
         return
     job = new_job(user=sender_open_id(event), text=text)
     append_job(settings.jobs_path, job)
-    reply_text(api, event, receipt(job))
+    if job.risk != "read":
+        reply_text(api, event, receipt(job))
+        return
+    ask = parse_probe(text)
+    if ask is None:
+        reply_text(api, event, receipt(job) + "\n暂无只读工人认领这类问题。问「N80-B 通不通」会去查拓扑。")
+        return
+    reply_text(api, event, f"工单 {job.id}\n正在查拓扑（只读，不用点头）…")
+    target = chat_target(event)
+    threading.Thread(
+        target=run_probe_job,
+        args=(settings, api, target, job),
+        daemon=True,
+        name=f"probe-{job.id}",
+    ).start()
 
 
 def build_handler(settings: Settings, api: lark.Client):
@@ -127,7 +177,7 @@ def main() -> None:
     api = lark.Client.builder().app_id(settings.app_id).app_secret(settings.app_secret).build()
     handler = build_handler(settings, api)
     log.info("长连接启动 mode=%s app_id=%s", settings.mode, settings.app_id)
-    log.info("飞书里搜机器人，发一句纯文本。echo 模式会原样回你。")
+    log.info("jobs 模式：问「N80-B 通不通」会查 %s", settings.topology_url if settings.mode == "jobs" else "")
     ws = lark.ws.Client(
         settings.app_id,
         settings.app_secret,

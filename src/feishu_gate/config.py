@@ -15,6 +15,7 @@ class Settings:
     app_secret: str
     mode: str
     allow_open_ids: frozenset[str]
+    topology_url: str
     data_dir: Path
 
     @property
@@ -37,10 +38,14 @@ def load_settings() -> Settings:
     allow = frozenset(part.strip() for part in raw_ids.split(",") if part.strip())
     data_dir = _ROOT / "data"
     data_dir.mkdir(exist_ok=True)
+    topology_url = (
+        os.environ.get("TOPOLOGY_STATUS_URL") or "http://192.168.1.107:8080/api/status"
+    ).strip()
     return Settings(
         app_id=app_id,
         app_secret=app_secret,
         mode=mode,
         allow_open_ids=allow,
+        topology_url=topology_url,
         data_dir=data_dir,
     )

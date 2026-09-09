@@ -61,18 +61,15 @@ ping
 
 ---
 
-## 4. 接到工单
+## 4. 工单 + 只读工人
 
-通道确认后，把 `.env` 里改成：
+`.env` 里保持 `FEISHU_MODE=jobs`。关掉旧窗口再启动 `feishu-gate.exe`。
 
-```
-FEISHU_MODE=jobs
-```
+- 发「N80-B 通不通」或「B3 又灰了」：先回工单号，再查 `TOPOLOGY_STATUS_URL`（默认 `http://192.168.1.107:8080/api/status`），把通/灰推回飞书。
+- 发「给拓扑加按钮」：只入队，`risk=write`，还不会改代码。
+- 发无关闲聊：回「暂无只读工人认领」。
 
-重启 `feishu-gate.exe`。再发一句，会回工单号，并追加到 `data/jobs.jsonl`。  
-`risk` 目前是按关键字猜的：普通询问 = read，含「改/部署」= write，含「删除/关机」= destroy。后面再接到真正的工人。
-
-可选：把你的 `open_id` 填进 `FEISHU_ALLOW_OPEN_IDS`，只让你一个人能下任务。可在飞书收到的第一条 jobs 回执对应的 jsonl 里看到 `user`。
+麒麟上的拓扑网页要在跑，否则会回「拓扑服务连不上」。
 
 ---
 
