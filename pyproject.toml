@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "feishu-gate"
+version = "0.1.0"
+description = "Feishu long-connection echo bot, then job tickets"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "lark-oapi>=1.4.0",
+  "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+
+[project.scripts]
+feishu-gate = "feishu_gate.bot:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
