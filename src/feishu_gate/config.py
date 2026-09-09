@@ -6,6 +6,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from feishu_gate.projects import Project, catalog
+
 _ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -19,6 +21,7 @@ class Settings:
     cursor_api_key: str
     cursor_model: str
     write_cwd: str
+    gate_cwd: str
     data_dir: Path
 
     @property
@@ -28,6 +31,16 @@ class Settings:
     @property
     def state_path(self) -> Path:
         return self.data_dir / "jobs-state.json"
+
+    def projects(self) -> dict[str, Project]:
+        return catalog(topology_cwd=self.write_cwd, gate_cwd=self.gate_cwd)
+
+    def project(self, project_id: str) -> Project:
+        items = self.projects()
+        return items.get(project_id) or items["topology"]
+
+    def cwd_for(self, project_id: str) -> str:
+        return self.project(project_id).cwd
 
 
 def load_settings() -> Settings:
@@ -60,6 +73,7 @@ def load_settings() -> Settings:
         os.environ.get("WRITE_CWD")
         or str(_ROOT.parent / "演示方案讨论" / "topology-heartbeat-viewer")
     ).strip()
+    gate_cwd = (os.environ.get("FEISHU_GATE_CWD") or str(_ROOT)).strip()
     return Settings(
         app_id=app_id,
         app_secret=app_secret,
@@ -69,5 +83,6 @@ def load_settings() -> Settings:
         cursor_api_key=cursor_api_key,
         cursor_model=cursor_model,
         write_cwd=write_cwd,
+        gate_cwd=gate_cwd,
         data_dir=data_dir,
     )

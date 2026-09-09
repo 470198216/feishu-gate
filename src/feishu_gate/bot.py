@@ -6,6 +6,7 @@ import re
 import sys
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import (
@@ -16,10 +17,21 @@ from lark_oapi.api.im.v1 import (
     ReplyMessageRequestBody,
 )
 
-from feishu_gate.coder import run_write
+from feishu_gate.coder import WriteReport, run_write
 from feishu_gate.config import Settings, load_settings
+from feishu_gate.gitwork import revert_to_snapshot, snapshot_json
 from feishu_gate.intent import parse_approval, parse_probe
-from feishu_gate.jobs import Job, append_job, new_job, receipt, review_card, with_status
+from feishu_gate.jobs import (
+    Job,
+    accept_card,
+    append_job,
+    evolve,
+    new_job,
+    receipt,
+    review_card,
+    with_status,
+)
+from feishu_gate.projects import parse_project
 from feishu_gate.probe import run_probe
 from feishu_gate.store import JobStore
 
@@ -131,19 +143,53 @@ def run_probe_job(settings: Settings, api: lark.Client, target: ChatTarget, job:
             log.exception("连失败回执也没发出去")
 
 
+def _has_diff(report: WriteReport) -> bool:
+    status = (report.git_status or "").strip()
+    if not status or status in {"(工作区干净)", "(不是 git 仓库)"}:
+        return bool((report.git_diff or "").strip())
+    return True
+
+
 def run_write_job(settings: Settings, store: JobStore, api: lark.Client, target: ChatTarget, job: Job) -> None:
+    project = settings.project(job.project)
     try:
-        body = run_write(
+        report = run_write(
             api_key=settings.cursor_api_key,
             model=settings.cursor_model,
-            cwd=settings.write_cwd,
+            cwd=project.cwd,
             task=job.text,
+            playbook=project.playbook,
+            project=project.id,
         )
-        store.put(with_status(job, "done", note=body[:500]))
-        send_text(api, target, f"工单 {job.id} 写完\n{body}")
+        current = store.get(job.id) or job
+        baseline = current.baseline or report.baseline
+        if report.failed and not _has_diff(report):
+            store.put(evolve(current, status="done", note=report.summary[:500], baseline=baseline))
+            send_text(api, target, f"工单 {job.id}\n{report.summary}")
+            return
+        reviewed = evolve(
+            current,
+            status="review",
+            note=report.summary[:500],
+            baseline=baseline,
+        )
+        store.put(reviewed)
+        send_text(
+            api,
+            target,
+            accept_card(
+                reviewed,
+                project.cwd,
+                project.title,
+                report.summary,
+                report.git_status,
+                report.git_diff,
+            ),
+        )
     except Exception:
         log.exception("写入工人失败 job=%s", job.id)
-        store.put(with_status(job, "done", note="coder-error"))
+        current = store.get(job.id) or job
+        store.put(evolve(current, status="done", note="coder-error"))
         try:
             send_text(api, target, f"工单 {job.id}\n改代码失败，看本机窗口日志。")
         except Exception:
@@ -153,28 +199,61 @@ def run_write_job(settings: Settings, store: JobStore, api: lark.Client, target:
             _CODE_LOCK.release()
 
 
-def _pick_waiting(store: JobStore, user: str, job_id: str | None) -> Job | str:
+def _list_jobs(jobs: list[Job]) -> str:
+    return "\n".join(f"{j.id}  {j.project}/{j.risk}  {j.text}" for j in jobs)
+
+
+def _pick_by_status(
+    store: JobStore,
+    user: str,
+    job_id: str | None,
+    status: str,
+    empty: str,
+) -> Job | str:
     if job_id:
         job = store.get(job_id)
         if job is None:
             return f"没有工单 {job_id}"
-        if job.status != "waiting":
-            return f"{job.id} 不是待审（status={job.status} risk={job.risk}）"
+        if job.status != status:
+            if status == "waiting" and job.status == "review":
+                return f"{job.id} 已经改完，请回「确认」收下改动，或「驳回」还原。"
+            return f"{job.id} 不是待审（status={job.status} risk={job.risk} project={job.project}）"
         return job
-    waiting = store.waiting(user) or store.waiting(None)
-    if not waiting:
+    found = store.by_status(status, user) or store.by_status(status, None)
+    if not found:
         last = store.latest(user)
         if last is None:
-            return "没有待审工单。"
+            return empty
         return (
-            f"没有待审工单。\n"
-            f"最近一单 {last.id} 是 {last.risk}/{last.status}：{last.text}\n"
-            f"写入任务请重新发一遍（例如「给拓扑加一个导出按钮」），出现【审核卡】后再回「通过」或「驳回」。"
+            f"{empty}\n"
+            f"最近一单 {last.id} 是 {last.project}/{last.risk}/{last.status}：{last.text}\n"
+            f"写入任务请写成「改拓扑：…」或「改机器人：…」，出现【审核卡】后再回「通过」。"
         )
-    if len(waiting) > 1:
-        lines = "\n".join(f"{j.id}  {j.risk}  {j.text}" for j in waiting)
-        return "有多单待审，请写：通过 job-xxxx\n" + lines
-    return waiting[0]
+    if len(found) > 1:
+        hint = "通过 job-xxxx" if status == "waiting" else "确认 job-xxxx"
+        return f"有多单，请写：{hint}\n" + _list_jobs(found)
+    return found[0]
+
+
+def _pick_rejectable(store: JobStore, user: str, job_id: str | None) -> Job | str:
+    if job_id:
+        job = store.get(job_id)
+        if job is None:
+            return f"没有工单 {job_id}"
+        if job.status not in {"waiting", "review"}:
+            return f"{job.id} 不能驳回（status={job.status}）"
+        return job
+    review = store.reviewing(user) or store.reviewing(None)
+    waiting = store.waiting(user) or store.waiting(None)
+    both = review + waiting
+    if not both:
+        last = store.latest(user)
+        if last is None:
+            return "没有待审或待验收工单。"
+        return f"没有待审或待验收工单。最近一单 {last.id} 是 {last.project}/{last.status}。"
+    if len(both) > 1:
+        return "有多单，请写：驳回 job-xxxx\n" + _list_jobs(both)
+    return both[0]
 
 
 def handle_approval(
@@ -185,15 +264,36 @@ def handle_approval(
     user: str,
     approval,
 ) -> None:
-    picked = _pick_waiting(store, user, approval.job_id)
+    if approval.action == "confirm":
+        picked = _pick_by_status(store, user, approval.job_id, "review", "没有待验收工单。")
+        if isinstance(picked, str):
+            reply_text(api, event, picked)
+            return
+        store.put(with_status(picked, "done", note=picked.note or "confirmed"))
+        proj = settings.project(picked.project)
+        reply_text(
+            api,
+            event,
+            f"已确认 {picked.id}。改动留在 {proj.cwd}，未 git commit / push。",
+        )
+        return
+    if approval.action == "reject":
+        picked = _pick_rejectable(store, user, approval.job_id)
+        if isinstance(picked, str):
+            reply_text(api, event, picked)
+            return
+        extra = ""
+        if picked.status == "review":
+            extra = revert_to_snapshot(Path(settings.cwd_for(picked.project)), picked.baseline)
+            extra = f"\n{extra}" if extra else ""
+        store.put(with_status(picked, "rejected", note=approval.reason))
+        reply_text(api, event, f"已驳回 {picked.id}\n{approval.reason or '无原因'}{extra}")
+        return
+    picked = _pick_by_status(store, user, approval.job_id, "waiting", "没有待审工单。")
     if isinstance(picked, str):
         reply_text(api, event, picked)
         return
     job = picked
-    if approval.action == "reject":
-        store.put(with_status(job, "rejected", note=approval.reason))
-        reply_text(api, event, f"已驳回 {job.id}\n{approval.reason or '无原因'}")
-        return
     if job.risk == "destroy":
         store.put(with_status(job, "blocked", note="human-ack"))
         reply_text(api, event, f"{job.id} 已归档。破坏档不会执行。")
@@ -202,11 +302,14 @@ def handle_approval(
         reply_text(api, event, "编码工人还在改上一单，稍后再通过。")
         return
     try:
-        store.put(with_status(job, "running"))
-        reply_text(api, event, f"{job.id} 已通过，开始改 {settings.write_cwd}")
+        cwd = settings.cwd_for(job.project)
+        running = evolve(job, status="running", baseline=snapshot_json(Path(cwd)))
+        store.put(running)
+        proj = settings.project(job.project)
+        reply_text(api, event, f"{job.id} 已通过，开始改 {proj.title}：{proj.cwd}")
         threading.Thread(
             target=run_write_job,
-            args=(settings, store, api, chat_target(event), job),
+            args=(settings, store, api, chat_target(event), running),
             daemon=True,
             name=f"write-{job.id}",
         ).start()
@@ -234,11 +337,17 @@ def handle_message(
     if approval is not None:
         handle_approval(settings, store, api, event, user, approval)
         return
-    job = new_job(user=user, text=text)
+    hit = parse_project(text)
+    job = new_job(user=user, text=text, project=hit.id)
     append_job(settings.jobs_path, job)
     store.put(job)
     if job.risk in {"write", "destroy"}:
-        reply_text(api, event, review_card(job, settings.write_cwd))
+        proj = settings.project(job.project)
+        reply_text(
+            api,
+            event,
+            review_card(job, proj.cwd, proj.title, explicit=hit.source != "default"),
+        )
         return
     ask = parse_probe(text)
     if ask is None:
@@ -274,7 +383,12 @@ def main() -> None:
     handler = build_handler(settings, store, api)
     log.info("长连接启动 mode=%s app_id=%s", settings.mode, settings.app_id)
     log.info("只读查 %s", settings.topology_url)
-    log.info("写入仓库 %s  key=%s", settings.write_cwd, "已配" if settings.cursor_api_key else "缺失")
+    log.info(
+        "项目 topology=%s  feishu-gate=%s  key=%s",
+        settings.write_cwd,
+        settings.gate_cwd,
+        "已配" if settings.cursor_api_key else "缺失",
+    )
     ws = lark.ws.Client(
         settings.app_id,
         settings.app_secret,

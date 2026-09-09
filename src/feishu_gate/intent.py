@@ -36,6 +36,7 @@ class Approval:
 
 
 _APPROVE = re.compile(r"^(通过|ok|批准)\s*(job-[0-9a-zA-Z-]+)?\s*$", re.I)
+_CONFIRM = re.compile(r"^(确认|验收)\s*(job-[0-9a-zA-Z-]+)?\s*$", re.I)
 _REJECT = re.compile(r"^(驳回|拒绝)(?:[:：]\s*|\s+)?(job-[0-9a-zA-Z-]+)?\s*(.*)$", re.I)
 
 
@@ -44,6 +45,9 @@ def parse_approval(text: str) -> Approval | None:
     m = _APPROVE.match(stripped)
     if m:
         return Approval(action="approve", job_id=(m.group(2) or "").strip() or None, reason="")
+    m = _CONFIRM.match(stripped)
+    if m:
+        return Approval(action="confirm", job_id=(m.group(2) or "").strip() or None, reason="")
     m = _REJECT.match(stripped)
     if m:
         job_id = (m.group(2) or "").strip() or None

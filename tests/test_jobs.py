@@ -19,3 +19,4 @@ def test_append_and_receipt(tmp_path: Path):
     text = receipt(job)
     assert job.id in text
     assert "risk=read" in text
+    assert "project=" in text

@@ -35,15 +35,21 @@ class JobStore:
             row = self._load().get(job_id)
         return job_from_dict(row) if row else None
 
-    def waiting(self, user: str | None = None) -> list[Job]:
+    def by_status(self, status: str, user: str | None = None) -> list[Job]:
         with self._lock:
             rows = list(self._load().values())
         jobs = [job_from_dict(row) for row in rows]
-        jobs = [j for j in jobs if j.status == "waiting"]
+        jobs = [j for j in jobs if j.status == status]
         if user:
             jobs = [j for j in jobs if j.user == user]
         jobs.sort(key=lambda j: j.created_at)
         return jobs
+
+    def waiting(self, user: str | None = None) -> list[Job]:
+        return self.by_status("waiting", user)
+
+    def reviewing(self, user: str | None = None) -> list[Job]:
+        return self.by_status("review", user)
 
     def latest(self, user: str | None = None) -> Job | None:
         with self._lock:
@@ -68,6 +74,8 @@ def asdict_job(job: Job) -> dict:
         "created_at": job.created_at,
         "status": job.status,
         "note": job.note,
+        "project": job.project,
+        "baseline": job.baseline,
     }
 
 
@@ -81,4 +89,6 @@ def job_from_dict(row: dict) -> Job:
         created_at=str(row.get("created_at") or ""),
         status=str(row.get("status") or "queued"),
         note=str(row.get("note") or ""),
+        project=str(row.get("project") or "topology"),
+        baseline=str(row.get("baseline") or ""),
     )
