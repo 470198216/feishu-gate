@@ -6,6 +6,7 @@ from feishu_gate.jobs import append_job, infer_risk, new_job, receipt
 def test_infer_risk():
     assert infer_risk("B3 怎么又灰了") == "read"
     assert infer_risk("给拓扑加按钮") == "write"
+    assert infer_risk("给拓扑加一个导出按钮") == "write"
     assert infer_risk("删除全部数据") == "destroy"
 
 

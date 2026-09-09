@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 import threading
 from dataclasses import dataclass
@@ -15,10 +16,12 @@ from lark_oapi.api.im.v1 import (
     ReplyMessageRequestBody,
 )
 
+from feishu_gate.coder import run_write
 from feishu_gate.config import Settings, load_settings
-from feishu_gate.intent import parse_probe
-from feishu_gate.jobs import Job, append_job, new_job, receipt
+from feishu_gate.intent import parse_approval, parse_probe
+from feishu_gate.jobs import Job, append_job, new_job, receipt, review_card, with_status
 from feishu_gate.probe import run_probe
+from feishu_gate.store import JobStore
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,6 +29,7 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 log = logging.getLogger("feishu-gate")
+_CODE_LOCK = threading.Lock()
 
 
 def extract_text(event: P2ImMessageReceiveV1) -> str | None:
@@ -39,6 +43,8 @@ def extract_text(event: P2ImMessageReceiveV1) -> str | None:
     text = payload.get("text")
     if not isinstance(text, str):
         return None
+    text = re.sub(r"<at[^>]*>.*?</at>", "", text)
+    text = re.sub(r"@_user_\d+\s*", "", text)
     return text.strip() or None
 
 
@@ -110,9 +116,7 @@ def reply_text(api: lark.Client, event: P2ImMessageReceiveV1, text: str) -> None
     send_text(api, chat_target(event), text)
 
 
-def run_probe_job(
-    settings: Settings, api: lark.Client, target: ChatTarget, job: Job
-) -> None:
+def run_probe_job(settings: Settings, api: lark.Client, target: ChatTarget, job: Job) -> None:
     ask = parse_probe(job.text)
     if ask is None:
         return
@@ -127,7 +131,93 @@ def run_probe_job(
             log.exception("连失败回执也没发出去")
 
 
-def handle_message(settings: Settings, api: lark.Client, event: P2ImMessageReceiveV1) -> None:
+def run_write_job(settings: Settings, store: JobStore, api: lark.Client, target: ChatTarget, job: Job) -> None:
+    try:
+        body = run_write(
+            api_key=settings.cursor_api_key,
+            model=settings.cursor_model,
+            cwd=settings.write_cwd,
+            task=job.text,
+        )
+        store.put(with_status(job, "done", note=body[:500]))
+        send_text(api, target, f"工单 {job.id} 写完\n{body}")
+    except Exception:
+        log.exception("写入工人失败 job=%s", job.id)
+        store.put(with_status(job, "done", note="coder-error"))
+        try:
+            send_text(api, target, f"工单 {job.id}\n改代码失败，看本机窗口日志。")
+        except Exception:
+            log.exception("连失败回执也没发出去")
+    finally:
+        if _CODE_LOCK.locked():
+            _CODE_LOCK.release()
+
+
+def _pick_waiting(store: JobStore, user: str, job_id: str | None) -> Job | str:
+    if job_id:
+        job = store.get(job_id)
+        if job is None:
+            return f"没有工单 {job_id}"
+        if job.status != "waiting":
+            return f"{job.id} 不是待审（status={job.status} risk={job.risk}）"
+        return job
+    waiting = store.waiting(user) or store.waiting(None)
+    if not waiting:
+        last = store.latest(user)
+        if last is None:
+            return "没有待审工单。"
+        return (
+            f"没有待审工单。\n"
+            f"最近一单 {last.id} 是 {last.risk}/{last.status}：{last.text}\n"
+            f"写入任务请重新发一遍（例如「给拓扑加一个导出按钮」），出现【审核卡】后再回「通过」或「驳回」。"
+        )
+    if len(waiting) > 1:
+        lines = "\n".join(f"{j.id}  {j.risk}  {j.text}" for j in waiting)
+        return "有多单待审，请写：通过 job-xxxx\n" + lines
+    return waiting[0]
+
+
+def handle_approval(
+    settings: Settings,
+    store: JobStore,
+    api: lark.Client,
+    event: P2ImMessageReceiveV1,
+    user: str,
+    approval,
+) -> None:
+    picked = _pick_waiting(store, user, approval.job_id)
+    if isinstance(picked, str):
+        reply_text(api, event, picked)
+        return
+    job = picked
+    if approval.action == "reject":
+        store.put(with_status(job, "rejected", note=approval.reason))
+        reply_text(api, event, f"已驳回 {job.id}\n{approval.reason or '无原因'}")
+        return
+    if job.risk == "destroy":
+        store.put(with_status(job, "blocked", note="human-ack"))
+        reply_text(api, event, f"{job.id} 已归档。破坏档不会执行。")
+        return
+    if not _CODE_LOCK.acquire(blocking=False):
+        reply_text(api, event, "编码工人还在改上一单，稍后再通过。")
+        return
+    try:
+        store.put(with_status(job, "running"))
+        reply_text(api, event, f"{job.id} 已通过，开始改 {settings.write_cwd}")
+        threading.Thread(
+            target=run_write_job,
+            args=(settings, store, api, chat_target(event), job),
+            daemon=True,
+            name=f"write-{job.id}",
+        ).start()
+    except Exception:
+        _CODE_LOCK.release()
+        raise
+
+
+def handle_message(
+    settings: Settings, store: JobStore, api: lark.Client, event: P2ImMessageReceiveV1
+) -> None:
     if not allowed(settings, event):
         log.info("忽略非用户或未授权发送者")
         return
@@ -139,29 +229,34 @@ def handle_message(settings: Settings, api: lark.Client, event: P2ImMessageRecei
     if settings.mode == "echo":
         reply_text(api, event, text)
         return
-    job = new_job(user=sender_open_id(event), text=text)
+    user = sender_open_id(event)
+    approval = parse_approval(text)
+    if approval is not None:
+        handle_approval(settings, store, api, event, user, approval)
+        return
+    job = new_job(user=user, text=text)
     append_job(settings.jobs_path, job)
-    if job.risk != "read":
-        reply_text(api, event, receipt(job))
+    store.put(job)
+    if job.risk in {"write", "destroy"}:
+        reply_text(api, event, review_card(job, settings.write_cwd))
         return
     ask = parse_probe(text)
     if ask is None:
         reply_text(api, event, receipt(job) + "\n暂无只读工人认领这类问题。问「N80-B 通不通」会去查拓扑。")
         return
     reply_text(api, event, f"工单 {job.id}\n正在查拓扑（只读，不用点头）…")
-    target = chat_target(event)
     threading.Thread(
         target=run_probe_job,
-        args=(settings, api, target, job),
+        args=(settings, api, chat_target(event), job),
         daemon=True,
         name=f"probe-{job.id}",
     ).start()
 
 
-def build_handler(settings: Settings, api: lark.Client):
+def build_handler(settings: Settings, store: JobStore, api: lark.Client):
     def on_message(data: P2ImMessageReceiveV1) -> None:
         try:
-            handle_message(settings, api, data)
+            handle_message(settings, store, api, data)
         except Exception:
             log.exception("处理消息失败")
 
@@ -174,10 +269,12 @@ def build_handler(settings: Settings, api: lark.Client):
 
 def main() -> None:
     settings = load_settings()
+    store = JobStore(settings.state_path)
     api = lark.Client.builder().app_id(settings.app_id).app_secret(settings.app_secret).build()
-    handler = build_handler(settings, api)
+    handler = build_handler(settings, store, api)
     log.info("长连接启动 mode=%s app_id=%s", settings.mode, settings.app_id)
-    log.info("jobs 模式：问「N80-B 通不通」会查 %s", settings.topology_url if settings.mode == "jobs" else "")
+    log.info("只读查 %s", settings.topology_url)
+    log.info("写入仓库 %s  key=%s", settings.write_cwd, "已配" if settings.cursor_api_key else "缺失")
     ws = lark.ws.Client(
         settings.app_id,
         settings.app_secret,

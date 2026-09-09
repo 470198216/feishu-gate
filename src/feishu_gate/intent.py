@@ -28,6 +28,30 @@ class ProbeAsk:
     targets: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class Approval:
+    action: str
+    job_id: str | None
+    reason: str
+
+
+_APPROVE = re.compile(r"^(通过|ok|批准)\s*(job-[0-9a-zA-Z-]+)?\s*$", re.I)
+_REJECT = re.compile(r"^(驳回|拒绝)(?:[:：]\s*|\s+)?(job-[0-9a-zA-Z-]+)?\s*(.*)$", re.I)
+
+
+def parse_approval(text: str) -> Approval | None:
+    stripped = text.strip()
+    m = _APPROVE.match(stripped)
+    if m:
+        return Approval(action="approve", job_id=(m.group(2) or "").strip() or None, reason="")
+    m = _REJECT.match(stripped)
+    if m:
+        job_id = (m.group(2) or "").strip() or None
+        reason = (m.group(3) or "").strip()
+        return Approval(action="reject", job_id=job_id, reason=reason)
+    return None
+
+
 def parse_probe(text: str) -> ProbeAsk | None:
     raw = normalize(text)
     hits: list[str] = []

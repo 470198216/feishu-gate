@@ -16,11 +16,18 @@ class Settings:
     mode: str
     allow_open_ids: frozenset[str]
     topology_url: str
+    cursor_api_key: str
+    cursor_model: str
+    write_cwd: str
     data_dir: Path
 
     @property
     def jobs_path(self) -> Path:
         return self.data_dir / "jobs.jsonl"
+
+    @property
+    def state_path(self) -> Path:
+        return self.data_dir / "jobs-state.json"
 
 
 def load_settings() -> Settings:
@@ -41,11 +48,26 @@ def load_settings() -> Settings:
     topology_url = (
         os.environ.get("TOPOLOGY_STATUS_URL") or "http://192.168.1.107:8080/api/status"
     ).strip()
+    cursor_api_key = (os.environ.get("CURSOR_API_KEY") or "").strip()
+    if not cursor_api_key:
+        lan_env = _ROOT.parent / "cursor-lan" / ".env"
+        if lan_env.is_file():
+            from dotenv import dotenv_values
+
+            cursor_api_key = (dotenv_values(lan_env).get("CURSOR_API_KEY") or "").strip()
+    cursor_model = (os.environ.get("CURSOR_LAN_MODEL") or os.environ.get("CURSOR_MODEL") or "composer-2.5").strip()
+    write_cwd = (
+        os.environ.get("WRITE_CWD")
+        or str(_ROOT.parent / "演示方案讨论" / "topology-heartbeat-viewer")
+    ).strip()
     return Settings(
         app_id=app_id,
         app_secret=app_secret,
         mode=mode,
         allow_open_ids=allow,
         topology_url=topology_url,
+        cursor_api_key=cursor_api_key,
+        cursor_model=cursor_model,
+        write_cwd=write_cwd,
         data_dir=data_dir,
     )
