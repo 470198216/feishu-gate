@@ -155,4 +155,31 @@ def test_shutdown_card_hides_secrets():
     path = Path("C:/tmp/shutdown.json")
     text = shutdown_card("job-1", "下班关机", [], path)
     assert "密码" not in text
-    assert "还没有可关机设备" in text
+    assert "通过后仍会关本机" in text
+    off = shutdown_card("job-1", "下班关机", [], path, shutdown_self=False)
+    assert "还没有可关机设备" in off
+    assert "密码" not in off
+
+
+def test_load_options_and_self_shutdown(tmp_path: Path):
+    from feishu_gate.shutdown import load_options, schedule_self_shutdown, self_shutdown_command
+
+    missing = load_options(tmp_path / "nope.json")
+    assert missing.shutdown_self is True
+    assert missing.self_delay_sec == 8
+
+    path = tmp_path / "shutdown.json"
+    path.write_text(
+        json.dumps({"shutdown_self": False, "self_delay_sec": 3, "devices": []}),
+        encoding="utf-8",
+    )
+    opts = load_options(path)
+    assert opts.shutdown_self is False
+    assert opts.self_delay_sec == 3
+
+    slept: list[int] = []
+    ran: list[list[str]] = []
+    schedule_self_shutdown(delay_sec=2, sleeper=slept.append, runner=ran.append)
+    assert slept == [2]
+    assert ran == [self_shutdown_command()]
+    assert "shutdown" in ran[0][0].lower()

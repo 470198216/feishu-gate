@@ -9,7 +9,8 @@
 3. **shutdown.json**（从 `shutdown.example.json` 复制而来）  
    下班关机设备名单。飞书说「下班关机」并回复「通过」后，按这里的 IP 关机。  
    `os`：`kylin` 走 SSH（`shutdown -h now`）；`android` 默认走 ADB（`adb reboot -p`）。  
-   `order` 小的先关，网关填大、放最后。`enabled` 必须是 `true` 才会关。
+   `order` 小的先关，网关填大、放最后。`enabled` 必须是 `true` 才会关。  
+   `shutdown_self` 默认 true：现场关完、飞书回执发出后再关跑闸门的这台电脑。不想关本机就设 `false`。
 
 Agent 会先读环境记录和验收说明，再搭环境、测试、改代码。飞书回执里不会（也不应）出现密码。
 

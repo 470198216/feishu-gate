@@ -1,5 +1,7 @@
 {
   "adb_path": "",
+  "shutdown_self": true,
+  "self_delay_sec": 8,
   "devices": [
     {
       "name": "通信网关A（麒麟）",

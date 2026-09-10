@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -46,6 +47,12 @@ class Device:
         if _is_filled(self.sudo_password):
             return self.sudo_password
         return self.password
+
+
+@dataclass(frozen=True)
+class ShutdownOptions:
+    shutdown_self: bool = True
+    self_delay_sec: int = 8
 
 
 def bundled_adb(root: Path) -> Path:
@@ -146,6 +153,25 @@ def load_devices(path: Path) -> list[Device]:
     return devices
 
 
+def load_options(path: Path) -> ShutdownOptions:
+    if not path.is_file():
+        return ShutdownOptions()
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        return ShutdownOptions()
+    flag = raw.get("shutdown_self", True)
+    if isinstance(flag, str):
+        shutdown_self = flag.strip().lower() in {"1", "true", "yes", "on"}
+    else:
+        shutdown_self = bool(flag)
+    try:
+        delay = int(raw.get("self_delay_sec") if raw.get("self_delay_sec") is not None else 8)
+    except (TypeError, ValueError):
+        delay = 8
+    delay = max(0, min(delay, 120))
+    return ShutdownOptions(shutdown_self=shutdown_self, self_delay_sec=delay)
+
+
 def enabled_devices(devices: list[Device]) -> list[Device]:
     out: list[Device] = []
     for dev in devices:
@@ -170,8 +196,30 @@ def preview_lines(devices: list[Device]) -> list[str]:
     return lines
 
 
-def shutdown_card(job_id: str, text: str, devices: list[Device], cfg: Path) -> str:
+def shutdown_card(
+    job_id: str,
+    text: str,
+    devices: list[Device],
+    cfg: Path,
+    *,
+    shutdown_self: bool = True,
+) -> str:
+    local = (
+        "飞书关机结果发出后，会关本机（跑 feishu-gate 的这台电脑）。"
+        if shutdown_self
+        else "本机不关（shutdown.json 里 shutdown_self=false）。"
+    )
     if not devices:
+        if shutdown_self:
+            return (
+                f"【审核卡】{job_id}\n"
+                f"风险：shutdown（下班关机）\n"
+                f"任务：{text}\n"
+                f"配置：{cfg}\n"
+                "还没有可关机的现场设备。通过后仍会关本机。\n"
+                f"{local}\n"
+                "回复「通过」关机，「驳回」取消。"
+            )
         return (
             f"【审核卡】{job_id}\n"
             f"风险：shutdown（下班关机）\n"
@@ -182,15 +230,44 @@ def shutdown_card(job_id: str, text: str, devices: list[Device], cfg: Path) -> s
             "现在点「通过」也不会关机。回复「驳回」取消。"
         )
     body = "\n".join(preview_lines(devices))
+    order = "通过后先按配置关现场（网关请把 order 填大、放最后）"
+    if shutdown_self:
+        order += "，飞书回执发出后再关本机"
     return (
         f"【审核卡】{job_id}\n"
         f"风险：shutdown（下班关机）\n"
         f"任务：{text}\n"
-        f"通过后按配置关机（网关请把 order 填大、放最后关）：\n"
+        f"{order}：\n"
         f"{body}\n"
+        f"{local}\n"
         f"配置：{cfg}\n"
         "回复「通过」立刻关机，「驳回」取消。"
     )
+
+
+def self_shutdown_command() -> list[str]:
+    if os.name == "nt":
+        exe = Path(os.environ.get("SystemRoot") or r"C:\Windows") / "System32" / "shutdown.exe"
+        return [str(exe), "/s", "/t", "0", "/f"]
+    return ["shutdown", "-h", "now"]
+
+
+def schedule_self_shutdown(
+    *,
+    delay_sec: int = 8,
+    sleeper=time.sleep,
+    runner=None,
+) -> str:
+    wait = max(0, int(delay_sec))
+    if wait:
+        sleeper(wait)
+    cmd = self_shutdown_command()
+    log.info("本机关机 %s", " ".join(cmd))
+    if runner is None:
+        subprocess.Popen(cmd)
+    else:
+        runner(cmd)
+    return "本机已发出关机命令"
 
 
 def _ssh_via_openssh(dev: Device, cmd: str) -> str:

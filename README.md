@@ -102,6 +102,7 @@ ping
   - PATH 加的是**文件夹**，不是 `adb.exe` 本身；改完 PATH 后必须新开窗口并重启 `feishu-gate`
   - 设备要开 USB 调试 / 无线调试，且这台电脑能访问那个 IP
 - `order` 小的先关，**网关填大、放最后**
+- 现场关完、飞书「关机结果」发出后，会关本机（`shutdown_self`，默认 true；`self_delay_sec` 是回执后等待秒数）
 - 密码不会出现在飞书回执里
 
 先编辑 `feishu-gate/.agent/shutdown.json`（已 gitignore）。`删除/格式化` 仍然不会真执行。
