@@ -8,6 +8,7 @@ def test_infer_risk():
     assert infer_risk("给拓扑加按钮") == "write"
     assert infer_risk("给拓扑加一个导出按钮") == "write"
     assert infer_risk("删除全部数据") == "destroy"
+    assert infer_risk("下班关机") == "shutdown"
 
 
 def test_append_and_receipt(tmp_path: Path):

@@ -11,3 +11,5 @@ data/
 .idea/
 .vscode/
 .agent/environment.md
+.agent/shutdown.json
+tools/platform-tools/

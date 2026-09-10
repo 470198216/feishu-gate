@@ -1,0 +1,30 @@
+{
+  "adb_path": "",
+  "devices": [
+    {
+      "name": "通信网关A（麒麟）",
+      "ip": "待填写",
+      "os": "kylin",
+      "via": "ssh",
+      "port": 22,
+      "user": "待填写",
+      "password": "待填写",
+      "sudo_password": "",
+      "key_path": "",
+      "enabled": false,
+      "order": 100
+    },
+    {
+      "name": "安卓终端1",
+      "ip": "待填写",
+      "os": "android",
+      "via": "adb",
+      "port": 5555,
+      "user": "",
+      "password": "",
+      "adb_serial": "",
+      "enabled": false,
+      "order": 10
+    }
+  ]
+}

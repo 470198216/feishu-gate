@@ -9,7 +9,8 @@ from pathlib import Path
 
 from feishu_gate.projects import parse_project
 
-_DESTROY = re.compile(r"(删除|destroy|关机|格式化|rm\s+-rf)", re.I)
+_DESTROY = re.compile(r"(删除|destroy|格式化|rm\s+-rf)", re.I)
+_SHUTDOWN = re.compile(r"(下班关机|下班了.{0,6}关机|关现场|关设备|设备关机|^关机$)", re.I)
 _WRITE = re.compile(
     r"(改代码|改文件|部署|写入|发布|合入|修改|加按钮|加一个.{0,12}按钮|增加|新增|导出|实现|开发|commit|push)",
     re.I,
@@ -46,6 +47,8 @@ def with_status(job: Job, status: str, note: str = "") -> Job:
 def infer_risk(text: str) -> str:
     if _DESTROY.search(text):
         return "destroy"
+    if _SHUTDOWN.search(text.strip()):
+        return "shutdown"
     if _WRITE.search(text):
         return "write"
     return "read"
@@ -63,7 +66,7 @@ def new_job(*, user: str, text: str, channel: str = "feishu", project: str | Non
         text=text,
         risk=risk,
         created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        status="waiting" if risk in {"write", "destroy"} else "queued",
+        status="waiting" if risk in {"write", "destroy", "shutdown"} else "queued",
         project=project or hit.id,
     )
 
@@ -78,7 +81,8 @@ def receipt(job: Job) -> str:
     next_hint = {
         "read": "只读，已入队，无需点头。",
         "write": "写入档。回复「通过」才开工，「确认」才收下改动，「驳回」取消/还原。",
-        "destroy": "破坏档。即便点通过，本程序也不会执行删除/关机。",
+        "destroy": "破坏档。即便点通过，本程序也不会执行删除/格式化。",
+        "shutdown": "下班关机。回复「通过」才按配置关现场设备，「驳回」取消。",
     }[job.risk]
     return (
         f"工单 {job.id}\n"
@@ -94,7 +98,7 @@ def review_card(job: Job, cwd: str, title: str = "", explicit: bool = True) -> s
             f"【审核卡】{job.id}\n"
             f"风险：destroy\n"
             f"任务：{job.text}\n"
-            f"回复「通过」只表示已知悉并归档，不会真删/关机。\n"
+            f"回复「通过」只表示已知悉并归档，不会真删/格式化。\n"
             f"回复「驳回」取消。"
         )
     default_hint = ""

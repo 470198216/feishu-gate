@@ -33,6 +33,7 @@ from feishu_gate.jobs import (
 )
 from feishu_gate.projects import parse_project
 from feishu_gate.probe import run_probe
+from feishu_gate.shutdown import config_path, enabled_devices, load_devices, run_shutdown, shutdown_card
 from feishu_gate.store import JobStore
 
 logging.basicConfig(
@@ -42,6 +43,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("feishu-gate")
 _CODE_LOCK = threading.Lock()
+_OPS_LOCK = threading.Lock()
 
 
 def extract_text(event: P2ImMessageReceiveV1) -> str | None:
@@ -141,6 +143,23 @@ def run_probe_job(settings: Settings, api: lark.Client, target: ChatTarget, job:
             send_text(api, target, f"工单 {job.id}\n探测失败，看本机窗口日志。")
         except Exception:
             log.exception("连失败回执也没发出去")
+
+
+def run_shutdown_job(settings: Settings, store: JobStore, api: lark.Client, target: ChatTarget, job: Job) -> None:
+    try:
+        body = run_shutdown(Path(settings.gate_cwd))
+        store.put(with_status(job, "done", note=body[:500]))
+        send_text(api, target, f"工单 {job.id} 关机结果\n{body}")
+    except Exception:
+        log.exception("下班关机失败 job=%s", job.id)
+        store.put(with_status(job, "done", note="shutdown-error"))
+        try:
+            send_text(api, target, f"工单 {job.id}\n关机失败，看本机窗口日志。")
+        except Exception:
+            log.exception("连失败回执也没发出去")
+    finally:
+        if _OPS_LOCK.locked():
+            _OPS_LOCK.release()
 
 
 def _has_diff(report: WriteReport) -> bool:
@@ -298,6 +317,24 @@ def handle_approval(
         store.put(with_status(job, "blocked", note="human-ack"))
         reply_text(api, event, f"{job.id} 已归档。破坏档不会执行。")
         return
+    if job.risk == "shutdown":
+        if not _OPS_LOCK.acquire(blocking=False):
+            reply_text(api, event, "上一轮关机还在跑，稍后再通过。")
+            return
+        try:
+            running = with_status(job, "running")
+            store.put(running)
+            reply_text(api, event, f"{job.id} 已通过，开始按 .agent/shutdown.json 关机")
+            threading.Thread(
+                target=run_shutdown_job,
+                args=(settings, store, api, chat_target(event), running),
+                daemon=True,
+                name=f"shutdown-{job.id}",
+            ).start()
+        except Exception:
+            _OPS_LOCK.release()
+            raise
+        return
     if not _CODE_LOCK.acquire(blocking=False):
         reply_text(api, event, "编码工人还在改上一单，稍后再通过。")
         return
@@ -341,6 +378,11 @@ def handle_message(
     job = new_job(user=user, text=text, project=hit.id)
     append_job(settings.jobs_path, job)
     store.put(job)
+    if job.risk == "shutdown":
+        cfg = config_path(Path(settings.gate_cwd))
+        devices = enabled_devices(load_devices(cfg))
+        reply_text(api, event, shutdown_card(job.id, job.text, devices, cfg))
+        return
     if job.risk in {"write", "destroy"}:
         proj = settings.project(job.project)
         reply_text(
@@ -389,6 +431,7 @@ def main() -> None:
         settings.gate_cwd,
         "已配" if settings.cursor_api_key else "缺失",
     )
+    log.info("下班关机配置 %s", config_path(Path(settings.gate_cwd)))
     ws = lark.ws.Client(
         settings.app_id,
         settings.app_secret,

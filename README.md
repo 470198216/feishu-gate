@@ -92,6 +92,20 @@ ping
 - 多单时：`通过 job-xxxx` / `确认 job-xxxx` / `驳回 job-xxxx`
 - `删除全部数据` 这类 destroy：通过也只归档，不会真执行
 
+### 下班关机
+
+飞书发「下班关机」会出【审核卡】，列出 `.agent/shutdown.json` 里 `enabled=true` 的设备。回复 **通过** 才会关机。
+
+- 麒麟 / Linux：SSH 执行 `shutdown -h now`（可填密码或 `key_path`）
+- 安卓：ADB `adb connect IP:端口` 再 `adb reboot -p`
+  - 本机把 `platform-tools` 目录加入用户 PATH，或在 `shutdown.json` 写 `adb_path` 指向 `adb.exe`
+  - PATH 加的是**文件夹**，不是 `adb.exe` 本身；改完 PATH 后必须新开窗口并重启 `feishu-gate`
+  - 设备要开 USB 调试 / 无线调试，且这台电脑能访问那个 IP
+- `order` 小的先关，**网关填大、放最后**
+- 密码不会出现在飞书回执里
+
+先编辑 `feishu-gate/.agent/shutdown.json`（已 gitignore）。`删除/格式化` 仍然不会真执行。
+
 `CURSOR_API_KEY` 可写在 `feishu-gate/.env`，不写则自动用 `cursor-lan/.env` 里那把。启动窗口会打印两个项目路径和 `key=已配` 或 `缺失`。
 
 改代码可能要几分钟。同时只跑一单 Agent。拓扑本机自测用 `--http-port 18080`，不要去占麒麟的 8080。
